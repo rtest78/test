@@ -650,16 +650,16 @@ public class CollectionsDataService {
 
     public List<String> getAvailableDates(){return new ArrayList<String>(snapshots.keySet());}
     public String resolveDate(String requested){if(requested!=null&&snapshots.containsKey(requested))return requested;List<String> dates=getAvailableDates();return dates.isEmpty()?null:dates.get(dates.size()-1);}
-    public DailySnapshot getSnapshot(String date){return snapshots.get(date);}
+    public DailySnapshot getSnapshot(String date){return date==null?null:snapshots.get(date);}
     public int getLoadedDateCount(){return snapshots.size();}
     public String getDataDirectory(){return dataDirectory.toString();}
     public long getLastScanTimeMs(){return lastScanTimeMs;}
     public String getLastLoadError(){return lastLoadError;}
 
-    public String getPreviousDate(String currentDate){List<String> dates=getAvailableDates();int index=dates.indexOf(currentDate);return index>0?dates.get(index-1):null;}
+    public String getPreviousDate(String currentDate){if(currentDate==null)return null;List<String> dates=getAvailableDates();int index=dates.indexOf(currentDate);return index>0?dates.get(index-1):null;}
 
     public List<AccountDayView> findAccountDayViews(String currentDate,String memberFilter){
-        DailySnapshot current=snapshots.get(currentDate);DailySnapshot previous=snapshots.get(getPreviousDate(currentDate));
+        DailySnapshot current=getSnapshot(currentDate);DailySnapshot previous=getSnapshot(getPreviousDate(currentDate));
         Map<String,AccountRecord> right=current==null?Collections.<String,AccountRecord>emptyMap():current.asAccountMap();
         Map<String,AccountRecord> left=previous==null?Collections.<String,AccountRecord>emptyMap():previous.asAccountMap();
         Set<String> keys=new LinkedHashSet<String>();keys.addAll(left.keySet());keys.addAll(right.keySet());
@@ -682,7 +682,7 @@ public class CollectionsDataService {
 
     public ComparisonSummary getComparisonSummary(String currentDate,String memberFilter){
         List<AccountDayView> views=findAccountDayViews(currentDate,memberFilter);ComparisonSummary summary=new ComparisonSummary();summary.setCurrentDate(currentDate);summary.setPreviousDate(getPreviousDate(currentDate));
-        DailySnapshot current=snapshots.get(currentDate);summary.setCurrentAccounts(current==null?0:current.getAccountCount());Map<String,Long> risks=new LinkedHashMap<String,Long>();Map<String,Long> channels=new LinkedHashMap<String,Long>();Map<String,Long> paidOffChannels=new LinkedHashMap<String,Long>();Map<String,BigDecimal> paidOffAmounts=new LinkedHashMap<String,BigDecimal>();Map<String,Long> paidOffAmountCounts=new LinkedHashMap<String,Long>();Map<String,BigDecimal> collectedAmounts=new LinkedHashMap<String,BigDecimal>();Map<String,Long> collectedAmountCounts=new LinkedHashMap<String,Long>();
+        DailySnapshot current=getSnapshot(currentDate);summary.setCurrentAccounts(current==null?0:current.getAccountCount());Map<String,Long> risks=new LinkedHashMap<String,Long>();Map<String,Long> channels=new LinkedHashMap<String,Long>();Map<String,Long> paidOffChannels=new LinkedHashMap<String,Long>();Map<String,BigDecimal> paidOffAmounts=new LinkedHashMap<String,BigDecimal>();Map<String,Long> paidOffAmountCounts=new LinkedHashMap<String,Long>();Map<String,BigDecimal> collectedAmounts=new LinkedHashMap<String,BigDecimal>();Map<String,Long> collectedAmountCounts=new LinkedHashMap<String,Long>();
         for(AccountDayView view:views){if(view.getChangeType()==ChangeType.NEW)summary.setNewAccounts(summary.getNewAccounts()+1);else if(view.getChangeType()==ChangeType.MISSING)summary.setMissingAccounts(summary.getMissingAccounts()+1);else if(view.getChangeType()==ChangeType.CHANGED)summary.setChangedAccounts(summary.getChangedAccounts()+1);else summary.setUnchangedAccounts(summary.getUnchangedAccounts()+1);
             if(view.isRiskChanged()){summary.setRiskLevelChanged(summary.getRiskLevelChanged()+1);increment(risks,view.getRiskBefore(),view.getRiskAfter());}
             if(view.isChannelChanged()){summary.setChannelChanged(summary.getChannelChanged()+1);increment(channels,view.getChannelBefore(),view.getChannelAfter());}
@@ -697,7 +697,7 @@ public class CollectionsDataService {
 
     /** Accounts sent to each channel on one business date. */
     public List<ChannelCount> getChannelDistribution(String businessDate) {
-        DailySnapshot snapshot = snapshots.get(businessDate);
+        DailySnapshot snapshot = getSnapshot(businessDate);
         Map<String, Long> counts = new LinkedHashMap<String, Long>();
         if (snapshot != null) {
             for (AccountRecord account : snapshot.asAccountMap().values()) {
@@ -746,7 +746,7 @@ public class CollectionsDataService {
 
     public VerificationSummary getVerificationSummary(String currentDate) {
         VerificationSummary result=new VerificationSummary();result.setCurrentDate(currentDate);result.setPreviousDate(getPreviousDate(currentDate));
-        DailySnapshot current=snapshots.get(currentDate);DailySnapshot previous=snapshots.get(result.getPreviousDate());
+        DailySnapshot current=getSnapshot(currentDate);DailySnapshot previous=getSnapshot(result.getPreviousDate());
         if(current==null){result.setStatus("FAIL");result.getAnomalies().add(anomaly("ERROR","FILE_LOAD","","","No snapshot was loaded for the selected business date.","A readable daily file",currentDate,""));return result;}
         result.setCurrentApplications(current.getAccountCount());result.setFilesProcessed(current.getSourceFiles().size());result.setPreviousApplications(previous==null?0:previous.getAccountCount());result.setRejectedRecords(current.getRejectedLines());result.setDuplicateApplications(current.getDuplicateApplications());
 
