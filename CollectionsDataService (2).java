@@ -1,3 +1,60 @@
+package test2.service;
+
+import test2.model.AccountDayView;
+import test2.model.AccountDayView.ChangeType;
+import test2.model.AccountRecord;
+import test2.model.ComparisonSummary;
+import test2.model.ChannelCount;
+import test2.model.DailySnapshot;
+import test2.model.DailySummary;
+import test2.model.FieldChange;
+import test2.model.TransitionCount;
+import test2.model.ProcessingAnomaly;
+import test2.model.VerificationSummary;
+import test2.model.HistoricalReport;
+import test2.model.ChannelAmount;
+import test2.model.CollectedAccountView;
+import test2.model.DailyChannelSummary;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import javax.annotation.PostConstruct;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.net.URI;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
 @Service
 public class CollectionsDataService {
 
@@ -17,6 +74,7 @@ public class CollectionsDataService {
     private volatile Map<String, DailySnapshot> snapshots = Collections.emptyMap();
     private final Map<String, ComparisonSummary> comparisonCache = new ConcurrentHashMap<String, ComparisonSummary>();
     private final Map<String, VerificationSummary> verificationCache = new ConcurrentHashMap<String, VerificationSummary>();
+    private final Map<String, Map<String, Long>> channelCountCache = new ConcurrentHashMap<String, Map<String, Long>>();
     private volatile long lastScanTimeMs;
     private volatile String lastLoadError = "";
 
@@ -115,6 +173,7 @@ public class CollectionsDataService {
             snapshots = Collections.unmodifiableMap(loadedSnapshots);
             comparisonCache.clear();
             verificationCache.clear();
+            channelCountCache.clear();
             lastLoadError = "";
 
             long totalAccounts = 0;
@@ -142,19 +201,23 @@ public class CollectionsDataService {
     }
 
     /**
-     * Build the dashboard/reporting results before startup or reload completes.
-     * This keeps the first browser request from doing the expensive historical
-     * comparisons for a large data set.
+     * Build only the lightweight daily comparisons plus the latest verification.
+     * Older detailed verifications are calculated on demand and then cached. This
+     * keeps startup growth close to linear as more historical dates are added.
      */
     private void prebuildReportingCaches() {
         List<String> dates = getAvailableDates();
         if (dates.isEmpty()) return;
         long started = System.currentTimeMillis();
-        LOGGER.info("Building Collections reporting cache for [{}] business date(s).", dates.size());
-        for (String date : dates) getComparisonSummary(date, "");
-        for (String date : dates) getVerificationSummary(date);
-        LOGGER.info("Collections reporting cache is ready. Dates: [{}], elapsed: [{}] ms.",
-                dates.size(), System.currentTimeMillis() - started);
+        LOGGER.info("Building daily comparison cache for [{}] business date(s).", dates.size());
+        for (String date : dates) {
+            getChannelCounts(date);
+            getComparisonSummary(date, "");
+        }
+        String latestDate = dates.get(dates.size() - 1);
+        getVerificationSummary(latestDate);
+        LOGGER.info("Collections reporting cache is ready. Daily comparisons: [{}], detailed verification: [{}], elapsed: [{}] ms.",
+                dates.size(), latestDate, System.currentTimeMillis() - started);
     }
 
     private void loadFile(Path file, Map<String, DailySnapshot> loadedSnapshots) throws IOException {
@@ -662,7 +725,7 @@ public class CollectionsDataService {
             if(after==null){summary.setMissingAccounts(summary.getMissingAccounts()+1);String channel=before.getChannel().isEmpty()?"Not provided":before.getChannel();paidOffChannels.put(channel,paidOffChannels.containsKey(channel)?paidOffChannels.get(channel)+1:1);BigDecimal amount=paidOffAmount(before);summary.setTotalPaidOffAmount(summary.getTotalPaidOffAmount().add(amount));addAmount(paidOffAmounts,paidOffAmountCounts,channel,amount);continue;}
             if(!before.getRequestFields().equals(after.getRequestFields())||!before.getResponseFields().equals(after.getResponseFields()))summary.setChangedAccounts(summary.getChangedAccounts()+1);else summary.setUnchangedAccounts(summary.getUnchangedAccounts()+1);
             String riskBefore=before.getRiskLevel(),riskAfter=after.getRiskLevel();if(!riskBefore.equals(riskAfter)){summary.setRiskLevelChanged(summary.getRiskLevelChanged()+1);increment(risks,riskBefore,riskAfter);}
-            String channelBefore=before.getChannel(),channelAfter=after.getChannel();if(!channelBefore.equals(channelAfter)){summary.setChannelChanged(summary.getChannelChanged()+1);increment(channels,channelBefore,channelAfter);}
+            String channelBefore=before.getChannel(),channelAfter=after.getChannel();if(!channelBefore.equals(channelAfter)){summary.setChannelChanged(summary.getChannelChanged()+1);increment(channels,displayChannel(channelBefore),displayChannel(channelAfter));}
             BigDecimal collected=collectedAmount(before,after);if(collected.signum()>0){String channel=channelAfter.isEmpty()?"Not provided":channelAfter;summary.setTotalCollectedAmount(summary.getTotalCollectedAmount().add(collected));addAmount(collectedAmounts,collectedAmountCounts,channel,collected);}
         }
         for(Map.Entry<String,AccountRecord> entry:right.entrySet())if(!left.containsKey(entry.getKey())){AccountRecord after=entry.getValue();if(!filter.isEmpty()&&!filter.equals(after.getMemberNumber()))continue;summary.setNewAccounts(summary.getNewAccounts()+1);BigDecimal collected=collectedAmount(null,after);if(collected.signum()>0){String channel=after.getChannel().isEmpty()?"Not provided":after.getChannel();summary.setTotalCollectedAmount(summary.getTotalCollectedAmount().add(collected));addAmount(collectedAmounts,collectedAmountCounts,channel,collected);}}
@@ -677,15 +740,30 @@ public class CollectionsDataService {
 
     /** Accounts sent to each channel on one business date. */
     public List<ChannelCount> getChannelDistribution(String businessDate) {
+        return toChannelCounts(getChannelCounts(businessDate));
+    }
+
+    /** Simple channel -> account-count map for one business date. */
+    public Map<String, Long> getChannelCounts(String businessDate) {
+        if (businessDate == null) return Collections.emptyMap();
+        Map<String, Long> cached = channelCountCache.get(businessDate);
+        if (cached != null) return cached;
         DailySnapshot snapshot = getSnapshot(businessDate);
         Map<String, Long> counts = new LinkedHashMap<String, Long>();
-        if (snapshot != null) {
-            for (AccountRecord account : snapshot.asAccountMap().values()) {
-                String channel = account.getChannel().isEmpty() ? "Not provided" : account.getChannel();
-                counts.put(channel, counts.containsKey(channel) ? counts.get(channel) + 1 : 1);
-            }
+        if (snapshot != null) for (AccountRecord account : snapshot.asAccountMap().values()) {
+            String channel = displayChannel(account.getChannel());
+            counts.put(channel, counts.containsKey(channel) ? counts.get(channel) + 1 : 1);
         }
-        return toChannelCounts(counts);
+        Map<String, Long> result = Collections.unmodifiableMap(counts);
+        channelCountCache.put(businessDate, result);
+        return result;
+    }
+
+    /** Business-date -> (channel -> account count) for every loaded day. */
+    public Map<String, Map<String, Long>> getChannelCountsByDate() {
+        Map<String, Map<String, Long>> result = new LinkedHashMap<String, Map<String, Long>>();
+        for (String date : getAvailableDates()) result.put(date, getChannelCounts(date));
+        return Collections.unmodifiableMap(result);
     }
 
     /** Accounts sent to each channel for every loaded date. */
@@ -694,6 +772,65 @@ public class CollectionsDataService {
         for (String date : getAvailableDates()) result.put(date, getChannelDistribution(date));
         return result;
     }
+
+    /** Complete day-by-day channel population used by the channel report. */
+    public List<DailyChannelSummary> getDailyChannelSummaries() {
+        List<DailyChannelSummary> result = new ArrayList<DailyChannelSummary>();
+        for (String date : getAvailableDates()) {
+            DailySnapshot snapshot = getSnapshot(date);
+            Map<String, Long> counts = getChannelCounts(date);
+            result.add(new DailyChannelSummary(date, snapshot == null ? 0 : snapshot.getAccountCount(), counts));
+        }
+        return result;
+    }
+
+    public List<String> getAllChannels() {
+        Set<String> channels = new LinkedHashSet<String>();
+        for (DailyChannelSummary day : getDailyChannelSummaries()) channels.addAll(day.getChannelCounts().keySet());
+        List<String> result = new ArrayList<String>(channels);
+        Collections.sort(result);
+        return result;
+    }
+
+    /** Accounts assigned to one channel on the selected business date. */
+    public List<AccountRecord> getChannelAccounts(String businessDate, String channelFilter) {
+        DailySnapshot snapshot = getSnapshot(businessDate);
+        if (snapshot == null) return Collections.emptyList();
+        String filter = channelFilter == null ? "" : channelFilter.trim();
+        List<AccountRecord> result = new ArrayList<AccountRecord>();
+        for (AccountRecord account : snapshot.asAccountMap().values())
+            if (filter.isEmpty() || displayChannel(account.getChannel()).equalsIgnoreCase(filter)) result.add(account);
+        Collections.sort(result, new Comparator<AccountRecord>() { public int compare(AccountRecord a, AccountRecord b) {
+            int member = a.getMemberNumber().compareTo(b.getMemberNumber());
+            return member != 0 ? member : a.getAccountNumber().compareTo(b.getAccountNumber());
+        }});
+        return result;
+    }
+
+    /** Exact accounts behind a selected previous-channel to current-channel transition. */
+    public List<AccountDayView> getChannelTransitionAccounts(String currentDate, String fromChannel, String toChannel) {
+        DailySnapshot current = getSnapshot(currentDate), previous = getSnapshot(getPreviousDate(currentDate));
+        if (current == null || previous == null) return Collections.emptyList();
+        String from = fromChannel == null ? "" : fromChannel.trim(), to = toChannel == null ? "" : toChannel.trim();
+        Map<String, AccountRecord> right = current.asAccountMap();
+        List<AccountDayView> result = new ArrayList<AccountDayView>();
+        for (Map.Entry<String, AccountRecord> entry : previous.asAccountMap().entrySet()) {
+            AccountRecord before = entry.getValue(), after = right.get(entry.getKey());
+            if (after == null) continue;
+            String actualFrom = displayChannel(before.getChannel()), actualTo = displayChannel(after.getChannel());
+            if (actualFrom.equals(actualTo)) continue;
+            if (!from.isEmpty() && !actualFrom.equalsIgnoreCase(from)) continue;
+            if (!to.isEmpty() && !actualTo.equalsIgnoreCase(to)) continue;
+            result.add(new AccountDayView(after, before, ChangeType.CHANGED, Collections.<FieldChange>emptyList()));
+        }
+        Collections.sort(result, new Comparator<AccountDayView>() { public int compare(AccountDayView a, AccountDayView b) {
+            int member = a.getAccount().getMemberNumber().compareTo(b.getAccount().getMemberNumber());
+            return member != 0 ? member : a.getAccount().getAccountNumber().compareTo(b.getAccount().getAccountNumber());
+        }});
+        return result;
+    }
+
+    private String displayChannel(String channel) { return channel == null || channel.trim().isEmpty() ? "Not provided" : channel.trim(); }
 
     /** Detailed from-channel -> to-channel movements for the selected date. */
     public List<TransitionCount> getChannelChangeDetails(String currentDate) {
@@ -722,7 +859,10 @@ public class CollectionsDataService {
     public List<CollectedAccountView> getCollectedAccountViews(String currentDate,String channelFilter){List<CollectedAccountView> result=new ArrayList<CollectedAccountView>();for(AccountDayView view:findAccountDayViews(currentDate,"")){BigDecimal amount=collectedAmount(view);if(amount.signum()<=0)continue;String channel=view.getChannelAfter().isEmpty()?"Not provided":view.getChannelAfter();if(channelFilter!=null&&!channelFilter.trim().isEmpty()&&!channel.equalsIgnoreCase(channelFilter.trim()))continue;String method=view.getCurrent().getExplicitAmountCollected().signum()>0?"Explicit collected/payment amount":"Decrease in amount past due";result.add(new CollectedAccountView(view.getCurrent(),view.getPrevious(),channel,amount,method));}Collections.sort(result,new Comparator<CollectedAccountView>(){public int compare(CollectedAccountView a,CollectedAccountView b){return b.getAmountCollected().compareTo(a.getAmountCollected());}});return result;}
 
     public List<AccountDayView> getPaidOffCandidates(String currentDate,String memberFilter){
-        List<AccountDayView> result=new ArrayList<AccountDayView>();for(AccountDayView view:findAccountDayViews(currentDate,memberFilter))if(view.getChangeType()==ChangeType.MISSING)result.add(view);return result;
+        DailySnapshot current=getSnapshot(currentDate),previous=getSnapshot(getPreviousDate(currentDate));
+        if(previous==null)return Collections.emptyList();Map<String,AccountRecord> right=current==null?Collections.<String,AccountRecord>emptyMap():current.asAccountMap();String filter=memberFilter==null?"":memberFilter.trim();
+        List<AccountDayView> result=new ArrayList<AccountDayView>();for(Map.Entry<String,AccountRecord> entry:previous.asAccountMap().entrySet()){AccountRecord before=entry.getValue();if(right.containsKey(entry.getKey()))continue;if(!filter.isEmpty()&&!filter.equals(before.getMemberNumber()))continue;result.add(new AccountDayView(null,before,ChangeType.MISSING,Collections.<FieldChange>emptyList()));}
+        Collections.sort(result,new Comparator<AccountDayView>(){public int compare(AccountDayView a,AccountDayView b){int member=a.getAccount().getMemberNumber().compareTo(b.getAccount().getMemberNumber());return member!=0?member:a.getAccount().getAccountNumber().compareTo(b.getAccount().getAccountNumber());}});return result;
     }
 
     public VerificationSummary getVerificationSummary(String currentDate) {
@@ -757,7 +897,7 @@ public class CollectionsDataService {
         }
 
         List<AccountDayView> paidOff=getPaidOffCandidates(currentDate,"");result.setPaidOffCandidates(paidOff.size());
-        for(AccountDayView view:paidOff){AccountRecord account=view.getPrevious();result.getAnomalies().add(anomaly("REVIEW","PAID_OFF_CANDIDATE",account.getMemberNumber(),account.getAccountNumber(),"The account is absent from the current file and may be paid off. Verify in the source system.","Present on "+result.getPreviousDate(),"Absent on "+currentDate,source(account)));}
+        if(!paidOff.isEmpty())result.getAnomalies().add(anomaly("REVIEW","PAID_OFF_CANDIDATE","","","Accounts are absent from the selected date and require paid-off verification. Open the Paid-Off page for the complete account list.","Present on "+result.getPreviousDate(),paidOff.size()+" accounts absent on "+currentDate,""));
 
         ComparisonSummary comparison=getComparisonSummary(currentDate,"");double riskAverage=historicalComparisonAverage(dates,currentIndex,"risk");double channelAverage=historicalComparisonAverage(dates,currentIndex,"channel");double paidOffAverage=historicalComparisonAverage(dates,currentIndex,"paidOff");
         if(comparison.getRiskLevelChanged()>=5&&comparison.getRiskLevelChanged()>Math.max(1,riskAverage*2))result.getAnomalies().add(anomaly("WARNING","RISK_MOVEMENT","","","Risk-level changes are unusually high compared with prior daily runs.",format(riskAverage)+" historical average",String.valueOf(comparison.getRiskLevelChanged()),""));
@@ -767,8 +907,32 @@ public class CollectionsDataService {
         Map<String,Double> historicalByChannel=historicalPaidOffChannelAverages(dates,currentIndex);
         for(ChannelCount channel:comparison.getPaidOffByChannel()){double expected=historicalByChannel.containsKey(channel.getChannel())?historicalByChannel.get(channel.getChannel()):0;if(channel.getCount()>=3&&channel.getCount()>Math.max(1,expected*2))result.getAnomalies().add(anomaly("WARNING","PAID_OFF_CHANNEL","","","Paid-off candidates from "+channel.getChannel()+" are unusually high.",format(expected)+" historical average",String.valueOf(channel.getCount()),""));}
 
+        appendDistributionAnomalies(result,current,history,"CHANNEL");
+        appendDistributionAnomalies(result,current,history,"RISK");
+        if(!history.isEmpty()){
+            double fileAverage=0;for(DailySnapshot day:history)fileAverage+=day.getSourceFiles().size();fileAverage/=history.size();
+            if(fileAverage>0&&Math.abs(current.getSourceFiles().size()-fileAverage)>=1&&Math.abs((current.getSourceFiles().size()-fileAverage)/fileAverage*100)>=50)
+                result.getAnomalies().add(anomaly("WARNING","FILE_COUNT","","","The number of source files differs materially from the historical daily pattern.",format(fileAverage)+" files average",String.valueOf(current.getSourceFiles().size())+" files",String.join(", ",current.getSourceFiles())));
+        }
+        if(previous!=null&&previous.getAccountCount()>0){double paidOffRate=(double)comparison.getMissingAccounts()*100.0/previous.getAccountCount();if(paidOffRate>=20)
+            result.getAnomalies().add(anomaly("ERROR","PAID_OFF_RATE","","","The percentage of accounts missing from the next business date is critically high.","Below 20%",format(paidOffRate)+"% ("+comparison.getMissingAccounts()+" accounts)",""));
+            else if(paidOffRate>=10)result.getAnomalies().add(anomaly("WARNING","PAID_OFF_RATE","","","The percentage of accounts missing from the next business date is unusually high.","Below 10%",format(paidOffRate)+"% ("+comparison.getMissingAccounts()+" accounts)",""));}
+
         if(result.getErrorCount()>0)result.setStatus("FAIL");else if(result.getWarningCount()>0||result.getReviewCount()>0)result.setStatus("REVIEW");else result.setStatus("PASS");if(currentDate!=null)verificationCache.put(currentDate,result);return result;
     }
+
+    private void appendDistributionAnomalies(VerificationSummary result,DailySnapshot current,List<DailySnapshot> history,String dimension){
+        if(history.size()<2)return;Map<String,Long> actual=distribution(current,dimension);Map<String,Double> average=new LinkedHashMap<String,Double>();
+        Set<String> keys=new LinkedHashSet<String>();keys.addAll(actual.keySet());for(DailySnapshot day:history)keys.addAll(distribution(day,dimension).keySet());
+        for(String key:keys){double total=0;for(DailySnapshot day:history){Long count=distribution(day,dimension).get(key);total+=count==null?0:count;}average.put(key,total/history.size());}
+        for(String key:keys){double expected=average.get(key);long observed=actual.containsKey(key)?actual.get(key):0;long difference=Math.abs(observed-Math.round(expected));
+            if(expected>=5&&observed==0)result.getAnomalies().add(anomaly("ERROR",dimension+"_DISAPPEARED","","",dimension.toLowerCase(Locale.ROOT)+" '"+key+"' was present historically but is absent from the selected date.",format(expected)+" accounts average","0 accounts",""));
+            else if(expected==0&&observed>=5)result.getAnomalies().add(anomaly("WARNING","NEW_"+dimension,"","","A new "+dimension.toLowerCase(Locale.ROOT)+" population appeared on the selected date.","0 historical accounts",observed+" accounts in "+key,""));
+            else if(expected>=5&&difference>=5){double variance=(observed-expected)/expected*100.0;if(Math.abs(variance)>=50){String severity=Math.abs(variance)>=100?"ERROR":"WARNING";result.getAnomalies().add(anomaly(severity,dimension+"_DISTRIBUTION_SHIFT","","",dimension.toLowerCase(Locale.ROOT)+" '"+key+"' changed materially from its historical volume.",format(expected)+" accounts average",observed+" accounts ("+signedPercent(variance)+")",""));}}
+        }
+    }
+
+    private Map<String,Long> distribution(DailySnapshot snapshot,String dimension){Map<String,Long> counts=new LinkedHashMap<String,Long>();if(snapshot==null)return counts;for(AccountRecord account:snapshot.asAccountMap().values()){String value="CHANNEL".equals(dimension)?displayChannel(account.getChannel()):account.getRiskLevel();if(value==null||value.trim().isEmpty())value="Not provided";counts.put(value,counts.containsKey(value)?counts.get(value)+1:1);}return counts;}
 
     private double historicalComparisonAverage(List<String> dates,int currentIndex,String metric){double total=0;int count=0;for(int i=1;i<currentIndex;i++){ComparisonSummary summary=getComparisonSummary(dates.get(i),"");if("risk".equals(metric))total+=summary.getRiskLevelChanged();else if("channel".equals(metric))total+=summary.getChannelChanged();else total+=summary.getMissingAccounts();count++;}return count==0?0:total/count;}
     private Map<String,Double> historicalPaidOffChannelAverages(List<String> dates,int currentIndex){Map<String,Double> totals=new LinkedHashMap<String,Double>();int days=0;for(int i=1;i<currentIndex;i++){for(ChannelCount item:getComparisonSummary(dates.get(i),"").getPaidOffByChannel())totals.put(item.getChannel(),(totals.containsKey(item.getChannel())?totals.get(item.getChannel()):0)+item.getCount());days++;}if(days>0)for(String key:new ArrayList<String>(totals.keySet()))totals.put(key,totals.get(key)/days);return totals;}
